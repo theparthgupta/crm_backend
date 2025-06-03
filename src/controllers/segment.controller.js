@@ -2,6 +2,7 @@ const Joi = require('joi');
 const Segment = require('../models/segment.model');
 const Customer = require('../models/customer.model');
 const ruleToMongoFilter = require('../utils/ruleToMongoFilter');
+const { generateSegmentRules } = require('../services/aiService'); // Import AI service for rule generation
 
 // Joi schema for segment rules (allowing flexible structure)
 const rulesSchema = Joi.object();
@@ -16,6 +17,11 @@ const saveSegmentSchema = Joi.object({
 const updateSegmentSchema = Joi.object({
   name: Joi.string().optional(),
   rules: rulesSchema.optional(),
+});
+
+// Schema for natural language query
+const nlQuerySchema = Joi.object({
+  query: Joi.string().required()
 });
 
 // Preview audience size for a given set of rules
@@ -133,6 +139,62 @@ const deleteSegment = async (req, res) => {
   }
 };
 
+// Generate segment rules from natural language
+const generateRulesFromNl = async (req, res) => {
+  const { error, value } = nlQuerySchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  try {
+    const nlQuery = value.query;
+    const generatedRules = await generateSegmentRules(nlQuery);
+
+    if (!generatedRules) {
+      return res.status(500).json({ error: 'Could not generate rules from natural language.' });
+    }
+
+    // Handle date placeholders for 'since' operator
+    // This is a basic example; a more robust solution might be needed
+    const replaceDatePlaceholders = (rules) => {
+        if (!rules || !rules.rules || !Array.isArray(rules.rules)) return rules;
+
+        rules.rules = rules.rules.map(rule => {
+            if (rule.operator === 'since' && typeof rule.value === 'string' && rule.value.startsWith('PAST_DATE_') && rule.value.endsWith('_ISO')) {
+                // Extract time period from placeholder (e.g., '6_MONTHS', '90_DAYS')
+                const periodPlaceholder = rule.value.substring(10, rule.value.length - 4); 
+                let date = new Date();
+
+                if (periodPlaceholder.endsWith('_MONTHS')) {
+                    const months = parseInt(periodPlaceholder.split('_')[0], 10);
+                    date.setMonth(date.getMonth() - months);
+                } else if (periodPlaceholder.endsWith('_DAYS')) {
+                    const days = parseInt(periodPlaceholder.split('_')[0], 10);
+                    date.setDate(date.getDate() - days);
+                } 
+                // Add more date logic here for other units (years, etc.) if needed
+                
+                // Use start of day for consistency
+                date.setHours(0, 0, 0, 0);
+                rule.value = date.toISOString(); // Replace placeholder with ISO string
+            }
+            // Recursively process nested rules if applicable
+            if (rule.operator && rule.rules) {
+                replaceDatePlaceholders(rule);
+            }
+            return rule;
+        });
+        return rules;
+    };
+
+    const finalRules = replaceDatePlaceholders(generatedRules);
+
+    res.json({ rules: finalRules });
+
+  } catch (err) {
+    console.error('Error generating rules from NL:', err);
+    res.status(500).json({ error: 'Failed to generate rules from natural language' });
+  }
+};
+
 module.exports = {
   previewSegment,
   saveSegment,
@@ -140,4 +202,5 @@ module.exports = {
   getSegmentById,
   updateSegment,
   deleteSegment,
+  generateRulesFromNl // Export the new function
 };

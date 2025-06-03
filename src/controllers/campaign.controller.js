@@ -5,6 +5,7 @@ const Customer = require('../models/customer.model');
 const CommunicationLog = require('../models/communicationLog.model');
 const ruleToMongoFilter = require('../utils/ruleToMongoFilter');
 const vendorService = require('../services/vendorService');
+const { generateCampaignSummary } = require('../services/aiService');
 
 const createCampaign = async (req, res) => {
   const schema = Joi.object({
@@ -119,21 +120,37 @@ const getCampaigns = async (req, res) => {
   }
 };
 
-// Get a specific campaign by ID for the logged-in user
+// Get a specific campaign by ID for the logged-in user and include AI summary
 const getCampaignById = async (req, res) => {
   try {
     // Find campaign by ID and ensure it belongs to the logged-in user
     const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id })
-      .populate('segmentId', 'name audienceSize');
+      .populate('segmentId', 'name audienceSize')
+      .lean(); // Use .lean() for plain JavaScript objects
     
     if (!campaign) {
       return res.status(404).json({ message: 'Campaign not found or not authorized' });
     }
+
+    // Generate AI summary if campaign is completed and has stats
+    let aiSummary = null;
+    if (campaign.status === 'COMPLETED' && campaign.stats) {
+        aiSummary = await generateCampaignSummary({
+            name: campaign.name,
+            totalAudience: campaign.stats.totalAudience,
+            sentCount: campaign.stats.sentCount,
+            failedCount: campaign.stats.failedCount,
+            successRate: campaign.stats.successRate
+        });
+    }
     
+    // Add the AI summary to the campaign object
+    campaign.aiSummary = aiSummary;
+
     res.json(campaign);
   } catch (error) {
-    console.error('Error fetching campaign:', error);
-    res.status(500).json({ message: 'Error fetching campaign', error: error.message });
+    console.error('Error fetching campaign or generating summary:', error);
+    res.status(500).json({ message: 'Error fetching campaign or generating summary', error: error.message });
   }
 };
 
