@@ -1,9 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const ingestionController = require('../controllers/ingestion.controller');
+const { ingestCustomer, ingestOrder, batchIngestCustomers } = require('../controllers/ingestion.controller');
 
-router.post('/customers', ingestionController.ingestCustomer);
+// Customer ingestion endpoints
+router.post('/customers', ingestCustomer);
+router.post('/customers/batch', batchIngestCustomers);
 
-router.post('/orders', ingestionController.ingestOrder);
+// Order ingestion endpoint
+router.post('/orders', ingestOrder);
 
 module.exports = router;

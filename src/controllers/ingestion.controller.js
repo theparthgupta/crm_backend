@@ -2,98 +2,132 @@ const Joi = require('joi');
 const Customer = require('../models/customer.model');
 const Order = require('../models/order.model');
 
+// Schema for customer data validation
 const customerSchema = Joi.object({
-  customerId: Joi.number().integer().required(),
-  name: Joi.string().max(255).allow('', null),
+  customerId: Joi.number().required(),
+  name: Joi.string().required(),
   email: Joi.string().email().required(),
-  phone: Joi.string().max(50).allow('', null),
+  phone: Joi.string().allow(''),
+  totalSpend: Joi.number().default(0),
+  visitCount: Joi.number().default(0),
+  lastPurchase: Joi.date().allow(null)
 });
 
+// Schema for order data validation
 const orderSchema = Joi.object({
-  orderId: Joi.number().integer().required(),
-  customerId: Joi.number().integer().required(),
-  orderAmount: Joi.number().precision(2).required(),
-  orderDate: Joi.date().iso().required(),
+  orderId: Joi.string().required(),
+  customerId: Joi.number().required(),
+  amount: Joi.number().required(),
+  items: Joi.array().items(
+    Joi.object({
+      productId: Joi.string().required(),
+      quantity: Joi.number().required(),
+      price: Joi.number().required()
+    })
+  ).required(),
+  status: Joi.string().valid('PENDING', 'COMPLETED', 'CANCELLED').required(),
+  orderDate: Joi.date().required()
 });
 
+// Ingest customer data
 const ingestCustomer = async (req, res) => {
-  const { error, value } = customerSchema.validate(req.body);
-  if (error) {
-    return res.status(400).json({ error: error.details[0].message });
-  }
-
-  const { customerId, name, email, phone } = value;
   try {
+    const { error, value } = customerSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
+
+    // Update or create customer
     const customer = await Customer.findOneAndUpdate(
-      { customerId },
-      { name, email, phone },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { customerId: value.customerId },
+      value,
+      { upsert: true, new: true }
     );
-    return res.status(201).json({
-      message: 'Customer ingested successfully',
-      customer,
+
+    res.status(200).json({
+      message: 'Customer data ingested successfully',
+      customer
     });
-  } catch (err) {
-    console.error('Error ingesting customer:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+  } catch (error) {
+    console.error('Customer ingestion error:', error);
+    res.status(500).json({ error: 'Failed to ingest customer data' });
   }
 };
 
+// Ingest order data
 const ingestOrder = async (req, res) => {
-  const { error, value } = orderSchema.validate(req.body);
-  if (error) {
-    return res.status(400).json({ error: error.details[0].message });
-  }
-
-  const { orderId, customerId, orderAmount, orderDate } = value;
   try {
-    const order = new Order({
-      orderId,
-      customerId,
-      orderAmount,
-      orderDate,
-    });
+    const { error, value } = orderSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
+
+    // Create new order
+    const order = new Order(value);
     await order.save();
 
-    const customer = await Customer.findOne({ customerId });
-    if (customer) {
-      customer.visitCount += 1;
-      customer.totalSpend += orderAmount;
-      // If lastPurchase is null or older than this orderDate, update
-      if (!customer.lastPurchase || new Date(orderDate) > customer.lastPurchase) {
-        customer.lastPurchase = orderDate;
+    // Update customer stats
+    await Customer.findOneAndUpdate(
+      { customerId: value.customerId },
+      {
+        $inc: { 
+          totalSpend: value.amount,
+          visitCount: 1
+        },
+        lastPurchase: value.orderDate
       }
-      await customer.save();
-    } else {
-      // If the customer record does not exist, you could:
-      //  a) reject the order (400 Bad Request)  
-      //  b) create a new customer skeleton  
-      // Here we’ll choose to create a minimal customer record.
-      await Customer.create({
-        customerId,
-        name: '',
-        email: '',
-        phone: '',
-        visitCount: 1,
-        totalSpend: orderAmount,
-        lastPurchase: orderDate,
-      });
+    );
+
+    res.status(200).json({
+      message: 'Order data ingested successfully',
+      order
+    });
+  } catch (error) {
+    console.error('Order ingestion error:', error);
+    res.status(500).json({ error: 'Failed to ingest order data' });
+  }
+};
+
+// Batch ingest customers
+const batchIngestCustomers = async (req, res) => {
+  try {
+    const { customers } = req.body;
+    if (!Array.isArray(customers)) {
+      return res.status(400).json({ error: 'Customers must be an array' });
     }
 
-    return res.status(201).json({
-      message: 'Order ingested and customer updated',
-      order,
+    const results = await Promise.all(
+      customers.map(async (customerData) => {
+        const { error, value } = customerSchema.validate(customerData);
+        if (error) {
+          return { error: error.details[0].message, data: customerData };
+        }
+
+        try {
+          const customer = await Customer.findOneAndUpdate(
+            { customerId: value.customerId },
+            value,
+            { upsert: true, new: true }
+          );
+          return { success: true, customer };
+        } catch (err) {
+          return { error: err.message, data: customerData };
+        }
+      })
+    );
+
+    res.status(200).json({
+      message: 'Batch customer ingestion completed',
+      results
     });
-  } catch (err) {
-    console.error('Error ingesting order:', err);
-    if (err.code === 11000) {
-      return res.status(409).json({ error: 'Order with this ID already exists' });
-    }
-    return res.status(500).json({ error: 'Internal server error' });
+  } catch (error) {
+    console.error('Batch customer ingestion error:', error);
+    res.status(500).json({ error: 'Failed to process batch customer ingestion' });
   }
 };
 
 module.exports = {
   ingestCustomer,
   ingestOrder,
+  batchIngestCustomers
 };
