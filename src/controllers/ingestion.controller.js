@@ -126,8 +126,58 @@ const batchIngestCustomers = async (req, res) => {
   }
 };
 
+// Batch ingest orders
+const batchIngestOrders = async (req, res) => {
+  try {
+    const { orders } = req.body;
+    if (!Array.isArray(orders)) {
+      return res.status(400).json({ error: 'Orders must be an array' });
+    }
+
+    const results = await Promise.all(
+      orders.map(async (orderData) => {
+        const { error, value } = orderSchema.validate(orderData);
+        if (error) {
+          return { error: error.details[0].message, data: orderData };
+        }
+
+        try {
+          // Create new order
+          const order = new Order(value);
+          await order.save();
+
+          // Update customer stats
+          await Customer.findOneAndUpdate(
+            { customerId: value.customerId },
+            {
+              $inc: { 
+                totalSpend: value.amount,
+                visitCount: 1
+              },
+              lastPurchase: value.orderDate
+            }
+          );
+
+          return { success: true, order };
+        } catch (err) {
+          return { error: err.message, data: orderData };
+        }
+      })
+    );
+
+    res.status(200).json({
+      message: 'Batch order ingestion completed',
+      results
+    });
+  } catch (error) {
+    console.error('Batch order ingestion error:', error);
+    res.status(500).json({ error: 'Failed to process batch order ingestion' });
+  }
+};
+
 module.exports = {
   ingestCustomer,
   ingestOrder,
-  batchIngestCustomers
+  batchIngestCustomers,
+  batchIngestOrders
 };

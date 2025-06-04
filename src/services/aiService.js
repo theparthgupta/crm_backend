@@ -55,13 +55,13 @@ Summary:`;
  * @returns {Promise<object|null>} A promise that resolves with the JSON rule object or null if generation fails.
  */
 async function generateSegmentRules(naturalLanguageQuery) {
-    if (!apiKey) {
-      console.error('GOOGLE_API_KEY not set. Cannot generate segment rules.');
-      return null;
-    }
+  if (!apiKey) {
+    console.error('GOOGLE_API_KEY not set. Cannot generate segment rules.');
+    return null;
+  }
 
-    const prompt = `Convert the following natural language description into a JSON object representing segment rules. 
-Use the specified structure and supported fields/operators. The output should be a valid JSON object ONLY.
+  const prompt = `Convert the following natural language description into a JSON object representing segment rules. 
+Return ONLY the JSON object without any markdown formatting or additional text.
 
 Supported fields: totalSpend, visitCount, lastPurchase
 Supported operators: >, <, =, >=, <=, since (for lastPurchase, value is an ISO 8601 date string)
@@ -98,37 +98,48 @@ Convert this:
 User: ${naturalLanguageQuery}
 JSON:`;
 
-    try {
-      const result = await model.generateContent(prompt);
-      const response = result.response;
-      let text = response.text();
+  try {
+    const result = await model.generateContent(prompt);
+    const response = result.response;
+    let text = response.text();
 
-      // ** Add logging here **
-      console.log('Raw AI response text:', text);
-      console.log('Attempting to parse JSON from text...', text.substring(0, Math.min(text.length, 50)) + (text.length > 50 ? '...' : '')); // Log start of text
-      
-      // ** More robust fix: Extract content between the first and last curly braces {} **
-      const jsonStartIndex = text.indexOf('{');
-      const jsonEndIndex = text.lastIndexOf('}');
+    // Clean the response text
+    text = text.replace(/```json\s*|\s*```/g, '').trim();
+    
+    // Handle date placeholders
+    const rules = JSON.parse(text);
+    const replaceDatePlaceholders = (rules) => {
+      if (!rules || !rules.rules || !Array.isArray(rules.rules)) return rules;
 
-      if (jsonStartIndex !== -1 && jsonEndIndex !== -1 && jsonEndIndex > jsonStartIndex) {
-          text = text.substring(jsonStartIndex, jsonEndIndex + 1);
-      } else {
-           // Fallback if curly braces not found (shouldn't happen with expected JSON)
-           console.warn('Could not find JSON curly braces in AI response. Attempting to trim and parse full text.');
-           text = text.trim();
-      }
-      
-      console.log('Cleaned text before JSON.parse:', text.substring(0, Math.min(text.length, 50)) + (text.length > 50 ? '...' : '')); // Log cleaned text
+      rules.rules = rules.rules.map(rule => {
+        if (rule.operator === 'since' && typeof rule.value === 'string' && rule.value.startsWith('PAST_DATE_') && rule.value.endsWith('_ISO')) {
+          const periodPlaceholder = rule.value.substring(10, rule.value.length - 4);
+          let date = new Date();
 
-      // The AI should return JSON text, try to parse it
-      const rules = JSON.parse(text);
+          if (periodPlaceholder.endsWith('_MONTHS')) {
+            const months = parseInt(periodPlaceholder.split('_')[0], 10);
+            date.setMonth(date.getMonth() - months);
+          } else if (periodPlaceholder.endsWith('_DAYS')) {
+            const days = parseInt(periodPlaceholder.split('_')[0], 10);
+            date.setDate(date.getDate() - days);
+          }
+
+          date.setHours(0, 0, 0, 0);
+          rule.value = date.toISOString();
+        }
+        if (rule.operator && rule.rules) {
+          replaceDatePlaceholders(rule);
+        }
+        return rule;
+      });
       return rules;
-    } catch (error) {
-      console.error('Error generating AI segment rules:', error);
-      // Return null or a specific error indicator
-      return null;
-    }
+    };
+
+    return replaceDatePlaceholders(rules);
+  } catch (error) {
+    console.error('Error generating AI segment rules:', error);
+    return null;
+  }
 }
 
 module.exports = { generateCampaignSummary, generateSegmentRules }; 
