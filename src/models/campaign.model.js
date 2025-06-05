@@ -22,7 +22,7 @@ const campaignSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['DRAFT', 'SCHEDULED', 'RUNNING', 'COMPLETED', 'FAILED'],
+      enum: ['DRAFT', 'SCHEDULED', 'RUNNING', 'IN_PROGRESS', 'COMPLETED', 'FAILED'],
       default: 'DRAFT'
     },
     schedule: {
@@ -45,6 +45,9 @@ const campaignSchema = new mongoose.Schema(
         type: Number,
         default: 0
       }
+    },
+    aiSummary: {
+      type: String
     }
   },
   { timestamps: true }

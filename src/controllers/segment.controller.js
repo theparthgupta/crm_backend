@@ -85,7 +85,17 @@ const getSegmentById = async (req, res) => {
     if (!segment) {
       return res.status(404).json({ error: 'Segment not found or not authorized' });
     }
-    res.json(segment);
+
+    // Calculate current audience size based on rules
+    const filter = ruleToMongoFilter(segment.rules);
+    const currentAudienceSize = await Customer.countDocuments(filter);
+
+    // Return segment details with the calculated audience size
+    res.json({
+        ...segment.toObject(), // Convert Mongoose document to plain object
+        audienceSize: currentAudienceSize // Override or add the calculated size
+    });
+
   } catch (err) {
     console.error('Error fetching segment:', err);
     res.status(500).json({ error: 'Failed to fetch segment' });

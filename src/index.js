@@ -34,28 +34,39 @@ app.use(passport.session());
 
 app.use(express.json());
 
+// Import routes
+const authRoutes = require('./routes/auth.routes');
+const customerRoutes = require('./routes/customer.routes');
+const segmentRoutes = require('./routes/segment.routes');
+const campaignRoutes = require('./routes/campaign.routes');
 const ingestionRoutes = require('./routes/ingestion.routes');
+const dashboardRoutes = require('./routes/dashboard.routes');
+const deliveryReceiptRoutes = require('./routes/deliveryReceipt.routes');
+
+// Register routes
+app.use('/api/auth', authRoutes);
+app.use('/api/customers', customerRoutes);
+app.use('/api/segments', segmentRoutes);
+app.use('/api/campaigns', campaignRoutes);
 app.use('/api/ingest', ingestionRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/delivery-receipts', deliveryReceiptRoutes);
 
 // Health check 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+// Start scheduler
+const { startScheduler } = require('./scheduler/campaignScheduler');
+startScheduler();
+
+// Connect to MongoDB and start server
 connectToMongo().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 Server listening on http://localhost:${PORT}`);
   });
 });
-
-const segmentRoutes = require('./routes/segment.routes');
-app.use('/api/segments', segmentRoutes);
-
-const campaignRoutes = require('./routes/campaign.routes');
-app.use('/api/campaigns', campaignRoutes);
-
-const deliveryReceiptRoutes = require('./routes/deliveryReceipt.routes');
-app.use('/api/delivery-receipts', deliveryReceiptRoutes);
 
 app.get('/auth/google', passport.authenticate('google', {
   scope: ['profile', 'email']
@@ -75,9 +86,6 @@ app.get('/auth/logout', (req, res, next) => {
     res.redirect(process.env.FRONTEND_URL || 'http://localhost:3000');
   });
 });
-
-const { startScheduler } = require('./scheduler/campaignScheduler');
-startScheduler();
 
 // Authentication check endpoint
 app.get('/api/auth/check', (req, res) => {

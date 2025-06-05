@@ -38,7 +38,8 @@ const createCampaign = async (req, res) => {
       segmentId: value.segmentId,
       message: value.message,
       schedule: value.schedule,
-      status: value.schedule ? 'SCHEDULED' : 'RUNNING', // Set status based on schedule
+      // Set status based on schedule date: RUNNING if in the past or no schedule, SCHEDULED if in the future
+      status: (!value.schedule || new Date(value.schedule) <= new Date()) ? 'RUNNING' : 'SCHEDULED', 
       stats: {
         totalAudience: customers.length,
         sentCount: 0,
@@ -49,8 +50,8 @@ const createCampaign = async (req, res) => {
 
     await campaign.save();
 
-    // If no schedule, start sending messages immediately
-    if (!value.schedule) {
+    // If status is RUNNING (either no schedule or past schedule), start sending messages immediately
+    if (campaign.status === 'RUNNING') {
       const deliveryResults = await vendorService.batchProcessMessages(customers, value.message);
       
       // Create communication log entries and update campaign stats
@@ -120,42 +121,294 @@ const getCampaigns = async (req, res) => {
   }
 };
 
-// Get a specific campaign by ID for the logged-in user and include AI summary
+// Get campaign by ID
 const getCampaignById = async (req, res) => {
   try {
-    // Find campaign by ID and ensure it belongs to the logged-in user
-    const campaign = await Campaign.findOne({ _id: req.params.id, userId: req.user._id })
-      .populate('segmentId', 'name audienceSize')
-      .lean(); // Use .lean() for plain JavaScript objects
-    
+    const campaign = await Campaign.findOne({
+      _id: req.params.id,
+      userId: req.user._id
+    })
+    .select('+aiSummary'); // Explicitly select aiSummary field
+
     if (!campaign) {
-      return res.status(404).json({ message: 'Campaign not found or not authorized' });
+      return res.status(404).json({ error: 'Campaign not found or not authorized' });
     }
 
-    // Generate AI summary if campaign is completed and has stats
-    let aiSummary = null;
-    if (campaign.status === 'COMPLETED' && campaign.stats) {
-        aiSummary = await generateCampaignSummary({
-            name: campaign.name,
-            totalAudience: campaign.stats.totalAudience,
-            sentCount: campaign.stats.sentCount,
-            failedCount: campaign.stats.failedCount,
-            successRate: campaign.stats.successRate
-        });
-    }
-    
-    // Add the AI summary to the campaign object
-    campaign.aiSummary = aiSummary;
+    // Get delivery statistics
+    const deliveryStats = await CommunicationLog.aggregate([
+      { $match: { campaignId: campaign._id } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 
-    res.json(campaign);
+    // Format delivery stats
+    const stats = {
+      total: campaign.stats.totalAudience || 0,
+      sent: 0,
+      failed: 0,
+      pending: 0
+    };
+
+    deliveryStats.forEach(stat => {
+      stats[stat._id.toLowerCase()] = stat.count;
+    });
+
+    // Get campaign status
+    let status = campaign.status;
+    if (status === 'SCHEDULED' && new Date(campaign.scheduledFor) <= new Date()) {
+      status = 'IN_PROGRESS';
+    }
+
+    // Get segment details
+    const segment = await Segment.findById(campaign.segmentId)
+      .select('name rules')
+      .lean();
+
+    // Calculate progress based on total audience
+    const progress = stats.total > 0 
+      ? ((stats.sent + stats.failed) / stats.total) * 100 
+      : 0;
+
+    res.json({
+      ...campaign.toObject(),
+      segment,
+      deliveryStats: stats,
+      status,
+      progress,
+      totalAudience: stats.total,
+      aiSummary: campaign.aiSummary // Include the aiSummary field
+    });
   } catch (error) {
-    console.error('Error fetching campaign or generating summary:', error);
-    res.status(500).json({ message: 'Error fetching campaign or generating summary', error: error.message });
+    console.error('Error fetching campaign:', error);
+    res.status(500).json({ error: 'Failed to fetch campaign' });
+  }
+};
+
+// Get delivery logs for a campaign
+const getCampaignLogs = async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const status = req.query.status; // Optional filter by status
+
+    // Verify campaign exists and belongs to user
+    const campaign = await Campaign.findOne({
+      _id: campaignId,
+      userId: req.user._id
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found or not authorized' });
+    }
+
+    // Build query
+    const query = { campaignId };
+    if (status) {
+      query.status = status.toUpperCase(); // Ensure status is uppercase to match DB
+    }
+
+    // Get logs with pagination and customer details
+    const logs = await CommunicationLog.find(query)
+      .populate('customerId', 'name email')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    // Get total count for pagination
+    const total = await CommunicationLog.countDocuments(query);
+
+    // Format response
+    const formattedLogs = logs.map(log => ({
+      customerId: log.customerId._id,
+      customerName: log.customerId.name,
+      customerEmail: log.customerId.email,
+      status: log.status,
+      timestamp: log.lastAttemptAt || log.createdAt,
+      error: log.failureReason,
+      messageId: log.vendorResponse?.messageId,
+      message: log.message // Include the message content
+    }));
+
+    // Get delivery statistics for the filtered logs
+    const stats = await CommunicationLog.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Format stats
+    const deliveryStats = {
+      total: campaign.stats.totalAudience || 0,
+      sent: 0,
+      failed: 0,
+      pending: 0
+    };
+
+    stats.forEach(stat => {
+      deliveryStats[stat._id.toLowerCase()] = stat.count;
+    });
+
+    res.json({
+      logs: formattedLogs,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      },
+      stats: deliveryStats
+    });
+  } catch (error) {
+    console.error('Error fetching campaign logs:', error);
+    res.status(500).json({ error: 'Failed to fetch campaign logs' });
+  }
+};
+
+// Subscribe to campaign updates
+const subscribeToCampaignUpdates = async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+
+    // Verify campaign exists and belongs to user
+    const campaign = await Campaign.findOne({
+      _id: campaignId,
+      userId: req.user._id
+    });
+
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found or not authorized' });
+    }
+
+    // Set headers for SSE
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Send initial state
+    const sendUpdate = async () => {
+      try {
+        // Get latest delivery stats
+        const deliveryStats = await CommunicationLog.aggregate([
+          { $match: { campaignId: campaign._id } },
+          {
+            $group: {
+              _id: '$status',
+              count: { $sum: 1 }
+            }
+          }
+        ]);
+
+        // Format stats
+        const stats = {
+          total: campaign.stats.totalAudience || 0,
+          sent: 0,
+          failed: 0,
+          pending: 0
+        };
+
+        deliveryStats.forEach(stat => {
+          stats[stat._id.toLowerCase()] = stat.count;
+        });
+
+        // Get campaign status
+        let status = campaign.status;
+        if (status === 'SCHEDULED' && new Date(campaign.scheduledFor) <= new Date()) {
+          status = 'IN_PROGRESS';
+        }
+
+        // Calculate progress based on total audience
+        const progress = stats.total > 0 
+          ? ((stats.sent + stats.failed) / stats.total) * 100 
+          : 0;
+
+        // Check if campaign is complete
+        const isComplete = status === 'COMPLETED' || status === 'FAILED';
+        const hasProcessedAll = stats.total > 0 && (stats.sent + stats.failed) >= stats.total;
+
+        // Send update
+        res.write(`data: ${JSON.stringify({
+          status,
+          stats,
+          progress,
+          totalAudience: stats.total,
+          timestamp: new Date().toISOString(),
+          isComplete: isComplete || hasProcessedAll
+        })}\n\n`);
+
+        // Continue sending updates if campaign is not completed
+        if (!isComplete && !hasProcessedAll) {
+          setTimeout(sendUpdate, 5000); // Update every 5 seconds
+        } else {
+          // Send one final update with complete stats
+          const finalStats = await CommunicationLog.aggregate([
+            { $match: { campaignId: campaign._id } },
+            {
+              $group: {
+                _id: '$status',
+                count: { $sum: 1 }
+              }
+            }
+          ]);
+
+          const finalStatsObj = {
+            total: campaign.stats.totalAudience || 0,
+            sent: 0,
+            failed: 0,
+            pending: 0
+          };
+
+          finalStats.forEach(stat => {
+            finalStatsObj[stat._id.toLowerCase()] = stat.count;
+          });
+
+          const finalProgress = finalStatsObj.total > 0 
+            ? ((finalStatsObj.sent + finalStatsObj.failed) / finalStatsObj.total) * 100 
+            : 0;
+
+          res.write(`data: ${JSON.stringify({
+            status: 'COMPLETED',
+            stats: finalStatsObj,
+            progress: finalProgress,
+            totalAudience: finalStatsObj.total,
+            timestamp: new Date().toISOString(),
+            isComplete: true
+          })}\n\n`);
+
+          res.end();
+        }
+      } catch (error) {
+        console.error('Error sending campaign update:', error);
+        res.end();
+      }
+    };
+
+    // Start sending updates
+    sendUpdate();
+
+    // Handle client disconnect
+    req.on('close', () => {
+      res.end();
+    });
+  } catch (error) {
+    console.error('Error setting up campaign updates:', error);
+    res.status(500).json({ error: 'Failed to set up campaign updates' });
   }
 };
 
 module.exports = {
   createCampaign,
   getCampaigns,
-  getCampaignById
+  getCampaignById,
+  getCampaignLogs,
+  subscribeToCampaignUpdates
 };
